@@ -70,15 +70,57 @@ def convert_polygon_to_lines(polygon_obj):
     return lines
 
 
-def extract_polygons(in_feature_class):
+def convert_polyline_to_lines(polyline_obj):
     """
-    Extracts polygons objects from input feature class
+    Converts a polyline object to set of stright segments
+
+    @param polyline_obj: The polyline object to covert
+    """
+    lines = []
+    # Step through each part of the feature
+    #
+    for part in polyline_obj:
+
+        # Step through each vertex in the feature
+        #
+        start_point = polyline_obj.firstPoint
+        line_start_point = None
+        current_line = []
+        for pnt in part:
+            if pnt:
+                if line_start_point is None:
+                    line_start_point = pnt
+                    current_line = [line_start_point]
+                    continue
+
+                # take the first two points since they will always be a line, and then check if the third point belong to the same line
+                # if the point belong to the same line then add the point to the line and move on the next point
+                # if the point does not belong to the same line then we need to take the last point of the the current line as the start point in the new line and the current point will be the second point
+                # of the new line and then we do the same again by taking the next point and checking if it belongs to the same line or not
+                if pnt != line_start_point:
+                    if len(current_line) < 2:
+                        current_line.append(pnt)
+                    else:
+                        if is_point_in_line(current_line, pnt):
+                            current_line.append(pnt)
+                        else:
+                            lines.append(current_line)
+                            line_start_point = current_line[-1]
+                            current_line = [line_start_point, pnt]
+        if current_line:
+            lines.append(current_line)
+
+    return lines
+
+def extract_shapes(in_feature_class):
+    """
+    Extracts shape  objects from input feature class
 
     @param in_feature_class:    Input feature class
 
-	@returns: dictionary with the FID as key and the polygon object as value
+	@returns: shape type and dictionary with the FID as key and the shape object as value
     """
-    result = {}
+    result = {'shape_type': None, 'shape_data': {}}
     # Identify the geometry field
     #
     desc = arcpy.Describe(in_feature_class)
@@ -95,21 +137,34 @@ def extract_polygons(in_feature_class):
         #
         feat = row.getValue(shapefieldname)
         FID = row.getValue(desc.OIDFieldName)
-        if feat.type == 'polygon':
-            result[FID] = feat
-        else:
-            print "Found a non-polygon feature in the input feature class. Skipping it..."
+        if result['shape_type'] is None:
+            result['shape_type'] = feat.type
+        # we only support one type in the same feature class, either polyline or polygon, no mixed shapes supported at the moment
+        elif result['shape_type'] != feat.type:
+            raise RuntimeError('Different shape types detected in input feature class. Not supported!')
+
+        result['shape_data'][FID] = feat
     del rows
 
     return result
 
 
-def draw_points(infc, output_fc):
-    with arcpy.da.InsertCursor(output_fc, ['SHAPE@XY']) as cursor:
-        for polygon in extract_polygons(infc).itervalues():
-            for line in convert_polygon_to_lines(polygon):
-                for point in line:
-                    cursor.insertRow([point])
+# def draw_points(infc, output_fc):
+#
+#     with arcpy.da.UpdateCursor(output_fc, [f.name for f in arcpy.ListFields(output_fc)]) as cursor:
+#         for row in cursor:
+#             cursor.deleteRow()
+#
+#     with arcpy.da.InsertCursor(output_fc, ['SHAPE@XY']) as cursor:
+#         result = extract_shapes(infc)
+#         for shape in result['shape_data'].itervalues():
+#             if result['shape_type'] == 'polygon':
+#                 lines = convert_polygon_to_lines(shape)
+#             elif result['shape_type'] == 'polyline':
+#                 lines = convert_polyline_to_lines(shape)
+#             for line in lines:
+#                 for point in line:
+#                     cursor.insertRow([point])
 
 
 
@@ -161,6 +216,7 @@ def douglas_peucker(_2d_coord, z_threshold):
             index = i
             dmax = d
     if dmax >= z_threshold:
+        print 'Dmax is: %s' % dmax
         results = douglas_peucker(_2d_coord[:index+1], z_threshold)[:-1] + douglas_peucker(_2d_coord[index:], z_threshold)
     else:
         results = [_2d_coord[0], _2d_coord[-1]]
@@ -189,42 +245,48 @@ def weed_line(line, z_threshold):
 
 
 
-def weed_3d_polygons(in_fc, z_threshold):
+def weed_3d_shapes(in_fc, z_threshold):
     """
-    Extracts all the 3d polygons from the input feature class
-    Decompose all the polygons to straight lines
+    Extracts all the 3d shapes (only works for polygons or polylines) from the input feature class
+    Decompose all the shapes to straight lines
     For each straight line, the points that make up the line will be weeded according to their z-value and its variation according to the z_threshold
 
     @param in_fc:   Input feature class, we expect this to contain 3d polygons
     @param z_threshold: The max allowed variation in each straight segment
     """
-    # extract all the polygons from the input feature class
-    print "Extracting polygons from input feature class"
-    polygons = extract_polygons(in_fc)
+    # extract all the shapes from the input feature class
+    print "Extracting shapes from input feature class"
+    result = extract_shapes(in_fc)
+    shape_type, shape_data = result['shape_type'], result['shape_data']
 
-    # create a map that will contain a polygon object as key and list of lines (border of the polygon) as value
-    polygon_lines_map = {}
+    # create a map that will contain a shape object as key and list of stright lines of that shape as value
+    shape_lines_map = {}
 
-    # convert each polygon to lines
-    for FID, polygon in polygons.iteritems():
-        polygon_lines_map[FID] = convert_polygon_to_lines(polygon)
+    # convert each shape to stright lines
+    for FID, shape in shape_data.iteritems():
+        if shape_type == 'polygon':
+            shape_lines_map[FID] = convert_polygon_to_lines(shape)
+        elif shape_type == 'polyline':
+            shape_lines_map[FID] = convert_polyline_to_lines(shape)
 
-    # for each polygon, go through the lines and weed the lines based on the z-variation
-    for lines in polygon_lines_map.itervalues():
+    # for each shape, go through the lines and weed the lines based on the z-variation
+    for lines in shape_lines_map.itervalues():
         for line in lines:
             weed_line(line, z_threshold)
 
-	# after weeding all the lines, create new polygons for the weeded vertices
-	updated_polygons = {}
-	for FID, lines in polygon_lines_map.iteritems():
-		all_polygon_points = []
-		for line in lines:
-			for point in line:
-				all_polygon_points.append(point)
-
-		polygon = arcpy.Polygon(arcpy.Array(all_polygon_points), polygons[FID].spatialReference, True, False)
-		updated_polygons[FID] = polygon
-    return updated_polygons
+	# after weeding all the lines, create new shapes for the weeded vertices
+	updated_shapes = {}
+    for FID, lines in shape_lines_map.iteritems():
+        all_points = []
+        for line in lines:
+            for point in line:
+                all_points.append(point)
+        if shape_type == 'polygon':
+            shape = arcpy.Polygon(arcpy.Array(all_points), shape_data[FID].spatialReference, True, False)
+        elif shape_type == 'polyline':
+            shape = arcpy.Polyline(arcpy.Array(all_points), shape_data[FID].spatialReference, True, False)
+        updated_shapes[FID] = shape
+    return updated_shapes
 
 
 def update_fc(fc, data):
@@ -254,8 +316,8 @@ def main(in_fc, z_threshold):
     # copy the input feature class to the output feature class
     arcpy.CopyFeatures_management(in_fc, output_fc)
 
-    print "Weeding 3D polygons."
-    result = weed_3d_polygons(in_fc, z_threshold)
+    print "Weeding 3D shapes."
+    result = weed_3d_shapes(in_fc, z_threshold)
 
     print "Done"
 
@@ -265,22 +327,23 @@ def main(in_fc, z_threshold):
     print "Done"
 
 
-    #draw all the points from the in_fc and output_fc for comparison
-    in_fc_points = os.path.join(os.path.dirname(in_fc), 'infc_points.shp')
-    out_fc_points = os.path.join(os.path.dirname(in_fc), 'outfc_points.shp')
-    draw_points(in_fc, in_fc_points)
-    draw_points(output_fc, out_fc_points)
-    # now we want to draw all the points to check how they look like
-    # all_points = []
-    # for lines in result.itervalues():
-    #     for line in lines:
-    #         for pnt in line:
-    #             all_points.append(pnt)
-
-    # draw_points(all_points, os.path.join(os.path.dirname(in_fc), 'Points.shp'))
+    # #draw all the points from the in_fc and output_fc for comparison
+    # in_fc_points = os.path.join(output_dir, 'infc_points.shp')
+    # out_fc_points = os.path.join(output_dir, 'outfc_points.shp')
+    # draw_points(in_fc, in_fc_points)
+    # draw_points(output_fc, out_fc_points)
+    # # now we want to draw all the points to check how they look like
+    # # all_points = []
+    # # for lines in result.itervalues():
+    # #     for line in lines:
+    # #         for pnt in line:
+    # #             all_points.append(pnt)
+    #
+    # # draw_points(all_points, os.path.join(os.path.dirname(in_fc), 'Points.shp'))
 
 
 if __name__ == "__main__":
+    # if we want to create toolbox in arcmap then we get the values from the user provided parameters
     infc = arcpy.GetParameterAsText(0)
     z_threshold = arcpy.GetParameter(1)
     main(infc, z_threshold)
