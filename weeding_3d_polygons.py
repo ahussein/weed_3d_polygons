@@ -270,16 +270,7 @@ def main(in_fc, z_threshold):
     out_fc_points = os.path.join(os.path.dirname(in_fc), 'outfc_points.shp')
     draw_points(in_fc, in_fc_points)
     draw_points(output_fc, out_fc_points)
-    # now we want to draw all the points to check how they look like
-    # all_points = []
-    # for lines in result.itervalues():
-    #     for line in lines:
-    #         for pnt in line:
-    #             all_points.append(pnt)
-
-    # draw_points(all_points, os.path.join(os.path.dirname(in_fc), 'Points.shp'))
-
-
+    
 if __name__ == "__main__":
     infc = arcpy.GetParameterAsText(0)
     z_threshold = arcpy.GetParameter(1)
